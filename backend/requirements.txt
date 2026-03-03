@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+python-multipart
+pydantic
+pydantic-settings
+openai
+pinecone-client
+pymupdf
+langchain-text-splitters
+python-dotenv
