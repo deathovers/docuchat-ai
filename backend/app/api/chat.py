@@ -12,13 +12,13 @@ chat_history = {}
 @router.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     try:
-        # 1. Retrieve context from Pinecone
+        # 1. Retrieve context from Pinecone with session isolation
         matches = await query_vectors(request.message, request.session_id)
         
-        # 2. Get history
+        # 2. Get history for context
         history = chat_history.get(request.session_id, [])[-10:] # Last 10 messages
         
-        # 3. Generate answer
+        # 3. Generate answer using LLM with context grounding
         answer, sources = await generate_answer(request.message, matches, history)
         
         # 4. Update history
