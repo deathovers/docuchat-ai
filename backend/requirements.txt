@@ -8,3 +8,4 @@ pinecone-client
 pymupdf
 langchain-text-splitters
 python-dotenv
+uuid
