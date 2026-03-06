@@ -1,5 +1,6 @@
 import logging
 import json
+import os
 from typing import AsyncGenerator
 from llama_index.core import StorageContext, load_index_from_storage
 from app.services.vector_store import get_storage_path
