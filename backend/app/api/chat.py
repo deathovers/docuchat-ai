@@ -1,12 +1,17 @@
 from fastapi import APIRouter, Body
-from sse_starlette.sse import EventSourceResponse
-from app.services.rag_engine import stream_chat
+msg_router = APIRouter()
+from fastapi.responses import StreamingResponse
+from app.services.rag_engine import query_documents
 
-router = APIRouter()
-
-@router.post("/chat")
+@msg_router.post("/chat")
 async def chat_endpoint(
-    query: str = Body(..., embed=True),
-    session_id: str = Body(..., embed=True)
+    session_id: str = Body(..., embed=True),
+    query: str = Body(..., embed=True)
 ):
-    return EventSourceResponse(stream_chat(query, session_id))
+    """
+    Streaming SSE endpoint for the chat interface.
+    """
+    return StreamingResponse(
+        query_documents(session_id, query),
+        media_type="text/event-stream"
+    )
