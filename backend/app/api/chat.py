@@ -1,17 +1,20 @@
-from fastapi import APIRouter, Body
-msg_router = APIRouter()
+from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 from app.services.rag_engine import query_documents
+from pydantic import BaseModel
 
-@msg_router.post("/chat")
-async def chat_endpoint(
-    session_id: str = Body(..., embed=True),
-    query: str = Body(..., embed=True)
-):
+router = APIRouter()
+
+class ChatRequest(BaseModel):
+    session_id: str
+    query: str
+
+@router.post("/chat")
+async def chat_endpoint(request: ChatRequest):
     """
-    Streaming SSE endpoint for the chat interface.
+    Endpoint to handle chat queries and return a streaming SSE response.
     """
     return StreamingResponse(
-        query_documents(session_id, query),
+        query_documents(request.session_id, request.query),
         media_type="text/event-stream"
     )
