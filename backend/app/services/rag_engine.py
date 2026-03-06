@@ -1,69 +1,69 @@
-import json
 import logging
+import json
 from typing import AsyncGenerator
-from llama_index.core import VectorStoreIndex
-from app.services.vector_store import get_vector_store
+from llama_index.core import StorageContext, load_index_from_storage
+from app.services.vector_store import get_storage_path
+from app.core.security import sanitize_session_id
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = (
-    "You are a helpful assistant that answers questions based ONLY on the provided context. "
-    "If the answer is not present in the context, state: 'The answer was not found in the uploaded documents.' "
-    "Do not use outside knowledge. Provide concise and accurate answers."
-)
-
-async def stream_chat(query: str, session_id: str) -> AsyncGenerator[str, None]:
+async def query_documents(session_id: str, query: str) -> AsyncGenerator[str, None]:
     """
-    Streams a RAG-based chat response for a given query and session.
-    Uses Pinecone namespaces for session isolation.
+    Core RAG logic: Retrieves context and streams LLM response with citations.
+    Addresses QA bugs:
+    1. Uses async_response_gen for async iteration.
+    2. Sanitizes session_id for security.
+    3. Uses aquery for non-blocking I/O.
+    """
+    safe_session_id = sanitize_session_id(session_id)
+    storage_dir = get_storage_path(safe_session_id)
     
-    Fixes:
-    - Replaced sync .query() with async .aquery() to prevent event loop blocking.
-    - Removed redundant retriever.retrieve() call; citations are now extracted from the response object.
-    - Added comprehensive try-except block for robust error handling during streaming.
-    """
+    if not os.path.exists(storage_dir):
+        yield f"data: {json.dumps({'type': 'error', 'content': 'No documents found for this session. Please upload files first.'})}\n\n"
+        return
+
     try:
-        # 1. Initialize Vector Store for the specific session (Namespace)
-        # The session_id acts as the namespace to ensure data isolation.
-        vector_store = get_vector_store(session_id)
-        index = VectorStoreIndex.from_vector_store(vector_store)
+        # Load index for the specific session
+        storage_context = StorageContext.from_defaults(persist_dir=storage_dir)
+        index = load_index_from_storage(storage_context)
         
-        # 2. Initialize Query Engine with streaming enabled
-        # We use similarity_top_k=5 as per TRD requirements.
+        # Configure query engine with streaming enabled
         query_engine = index.as_query_engine(
-            streaming=True, 
-            similarity_top_k=5,
-            system_prompt=SYSTEM_PROMPT
+            streaming=True,
+            similarity_top_k=5
         )
         
-        # 3. Perform the query asynchronously
-        # This is non-blocking and allows the FastAPI event loop to handle other requests.
+        # Use asynchronous query to prevent blocking the event loop
         response = await query_engine.aquery(query)
-
-        # 4. Extract citations from the response object directly
-        # This avoids the redundant retrieval step (calling retriever.retrieve separately),
-        # reducing latency and API costs for embeddings.
-        citations = [
-            {
-                "filename": n.node.metadata.get("file_name", "Unknown"),
-                "page": n.node.metadata.get("page_label", "Unknown")
-            }
-            for n in response.source_nodes
-        ]
         
-        # Stream citations first so the UI can display sources immediately
-        yield f"data: {json.dumps({'type': 'citations', 'content': citations})}\n\n"
-
-        # 5. Stream the text response chunks
-        # We iterate through the response generator provided by LlamaIndex
-        for text in response.response_gen:
-            yield f"data: {json.dumps({'type': 'text', 'content': text})}\n\n"
+        # 1. Stream the text chunks using the correct async generator
+        # Fix for TypeError: 'generator' object is not an async iterable
+        async for token in response.async_response_gen:
+            yield f"data: {json.dumps({'type': 'text', 'content': token})}\n\n"
             
+        # 2. Extract citations from source nodes (metadata)
+        # This replaces redundant retriever.retrieve() calls
+        citations = []
+        if hasattr(response, "source_nodes"):
+            for node in response.source_nodes:
+                metadata = node.node.metadata
+                citations.append({
+                    "filename": metadata.get("file_name", "Unknown"),
+                    "page": metadata.get("page_label", "N/A")
+                })
+        
+        # Deduplicate citations based on filename and page
+        unique_citations = []
+        seen = set()
+        for c in citations:
+            key = (c["filename"], c["page"])
+            if key not in seen:
+                unique_citations.append(c)
+                seen.add(key)
+
+        yield f"data: {json.dumps({'type': 'citations', 'content': unique_citations})}\n\n"
+        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
     except Exception as e:
-        logger.error(f"Error in stream_chat for session {session_id}: {str(e)}", exc_info=True)
-        # Stream a structured error message to the frontend
-        yield f"data: {json.dumps({'type': 'error', 'content': 'An error occurred while processing your request. Please try again.'})}\n\n"
-    
-    finally:
-        # Signal completion to the frontend to close the connection or update UI state
-        yield "data: {\"type\": \"done\"}\n\n"
+        logger.exception(f"Critical error in RAG engine for session {safe_session_id}")
+        yield f"data: {json.dumps({'type': 'error', 'content': 'An internal error occurred during retrieval.'})}\n\n"
