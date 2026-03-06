@@ -1,166 +1,143 @@
 "use client";
 
-import { useState, useEffect } from 'react';
-import { v4 as uuidv4 } from 'uuid';
-import { Upload, Send, FileText, Trash2, Loader2 } from 'lucide-react';
+import { useState, useEffect, useRef } from "react";
+import { Send, FileUp, Loader2 } from "lucide-react";
 
-const API_BASE = "http://localhost:8000/v1";
-
-export default function DocuChat() {
-  const [sessionId, setSessionId] = useState('');
-  const [files, setFiles] = useState<any[]>([]);
-  const [query, setQuery] = useState('');
-  const [messages, setMessages] = useState<any[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [uploading, setUploading] = useState(false);
+export default function Home() {
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const [messages, setMessages] = useState<{role: 'user' | 'ai', content: string, citations?: any[]}[]>([]);
+  const [isUploading, setIsUploading] = useState(false);
+  const [isTyping, setIsTyping] = useState(false);
+  const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    setSessionId(uuidv4());
+    const id = localStorage.getItem("docuchat_session") || Math.random().toString(36).substring(7);
+    localStorage.setItem("docuchat_session", id);
+    setSessionId(id);
   }, []);
 
+  useEffect(() => {
+    scrollRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
+
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (!e.target.files) return;
-    setUploading(true);
+    if (!e.target.files?.[0] || !sessionId) return;
+    setIsUploading(true);
     const formData = new FormData();
-    formData.append('session_id', sessionId);
-    Array.from(e.target.files).forEach(file => {
-      formData.append('files', file);
-    });
+    formData.append("file", e.target.files[0]);
 
     try {
-      const res = await fetch(`${API_BASE}/documents/upload`, {
-        method: 'POST',
+      await fetch("http://localhost:8000/api/v1/upload", {
+        method: "POST",
+        headers: { "x-session-id": sessionId },
         body: formData,
       });
-      const data = await res.json();
-      setFiles([...files, ...data.files]);
+      alert("File uploaded! Processing in background...");
     } catch (err) {
       console.error(err);
     } finally {
-      setUploading(false);
+      setIsUploading(false);
     }
   };
 
-  const handleQuery = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!query.trim() || loading) return;
+  const handleChat = async () => {
+    if (!query || !sessionId) return;
+    
+    const userMsg = query;
+    setQuery("");
+    setMessages(prev => [...prev, { role: 'user', content: userMsg }]);
+    setIsTyping(true);
 
-    const userMsg = { role: 'user', content: query };
-    setMessages([...messages, userMsg]);
-    setQuery('');
-    setLoading(true);
+    const response = await fetch("http://localhost:8000/api/v1/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query: userMsg, session_id: sessionId }),
+    });
 
-    try {
-      const res = await fetch(`${API_BASE}/chat/query`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: sessionId, query }),
-      });
-      const data = await res.json();
-      setMessages(prev => [...prev, { 
-        role: 'assistant', 
-        content: data.answer, 
-        sources: data.sources 
-      }]);
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setLoading(false);
+    const reader = response.body?.getReader();
+    if (!reader) return;
+
+    let aiContent = "";
+    let citations: any[] = [];
+    setMessages(prev => [...prev, { role: 'ai', content: "" }]);
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      const chunk = new TextDecoder().decode(value);
+      const lines = chunk.split("\n");
+      
+      for (const line of lines) {
+        if (line.startsWith("data: ")) {
+          try {
+            const data = JSON.parse(line.slice(6));
+            if (data.type === "text") {
+              aiContent += data.content;
+              setMessages(prev => {
+                const last = prev[prev.length - 1];
+                return [...prev.slice(0, -1), { ...last, content: aiContent }];
+              });
+            } else if (data.type === "citations") {
+              citations = data.content;
+              setMessages(prev => {
+                const last = prev[prev.length - 1];
+                return [...prev.slice(0, -1), { ...last, citations }];
+              });
+            }
+          } catch (e) {}
+        }
+      }
     }
-  };
-
-  const deleteFile = async (fileId: string) => {
-    await fetch(`${API_BASE}/documents/${fileId}`, { method: 'DELETE' });
-    setFiles(files.filter(f => f.file_id !== fileId));
+    setIsTyping(false);
   };
 
   return (
-    <div className="flex h-screen bg-gray-50">
-      {/* Sidebar */}
-      <div className="w-64 bg-white border-r p-4 flex flex-col">
-        <h1 className="text-xl font-bold mb-6">DocuChat AI</h1>
-        
-        <div className="mb-4">
-          <label className="flex items-center justify-center w-full h-12 border-2 border-dashed border-gray-300 rounded-lg cursor-pointer hover:bg-gray-50">
-            <div className="flex items-center space-x-2">
-              {uploading ? <Loader2 className="animate-spin" /> : <Upload size={20} />}
-              <span>Upload PDFs</span>
-            </div>
-            <input type="file" multiple accept=".pdf" className="hidden" onChange={handleUpload} disabled={uploading} />
-          </label>
-        </div>
+    <main className="flex flex-col h-screen max-w-4xl mx-auto p-4">
+      <header className="flex justify-between items-center mb-8 border-b pb-4">
+        <h1 className="text-2xl font-bold">DocuChat AI</h1>
+        <label className="cursor-pointer bg-blue-600 text-white px-4 py-2 rounded-lg flex items-center gap-2 hover:bg-blue-700 transition">
+          {isUploading ? <Loader2 className="animate-spin" /> : <FileUp size={20} />}
+          Upload PDF
+          <input type="file" className="hidden" accept=".pdf" onChange={handleUpload} disabled={isUploading} />
+        </label>
+      </header>
 
-        <div className="flex-1 overflow-y-auto">
-          <h2 className="text-sm font-semibold text-gray-500 uppercase mb-2">Documents</h2>
-          {files.map(file => (
-            <div key={file.file_id} className="flex items-center justify-between p-2 hover:bg-gray-100 rounded group">
-              <div className="flex items-center space-x-2 overflow-hidden">
-                <FileText size={16} className="text-blue-500 shrink-0" />
-                <span className="text-sm truncate">{file.name}</span>
-              </div>
-              <button onClick={() => deleteFile(file.file_id)} className="opacity-0 group-hover:opacity-100 text-red-500">
-                <Trash2 size={14} />
-              </button>
+      <div className="flex-1 overflow-y-auto space-y-4 mb-4 pr-2">
+        {messages.map((m, i) => (
+          <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+            <div className={`max-w-[80%] p-4 rounded-2xl ${m.role === 'user' ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-800'}`}>
+              <p className="whitespace-pre-wrap">{m.content}</p>
+              {m.citations && m.citations.length > 0 && (
+                <div className="mt-3 pt-2 border-t border-gray-300 text-xs italic">
+                  Sources: {m.citations.map((c, ci) => (
+                    <span key={ci} className="mr-2">[{c.filename}, p.{c.page}]</span>
+                  ))}
+                </div>
+              )}
             </div>
-          ))}
-        </div>
-      </div>
-
-      {/* Main Chat */}
-      <div className="flex-1 flex flex-col">
-        <div className="flex-1 overflow-y-auto p-6 space-y-4">
-          {messages.length === 0 && (
-            <div className="h-full flex items-center justify-center text-gray-400">
-              Upload documents and start asking questions!
-            </div>
-          )}
-          {messages.map((msg, i) => (
-            <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-              <div className={`max-w-2xl p-4 rounded-lg ${msg.role === 'user' ? 'bg-blue-600 text-white' : 'bg-white border shadow-sm'}`}>
-                <p className="whitespace-pre-wrap">{msg.content}</p>
-                {msg.sources && msg.sources.length > 0 && (
-                  <div className="mt-3 pt-3 border-t border-gray-100">
-                    <p className="text-xs font-bold text-gray-500 mb-1">SOURCES:</p>
-                    <div className="flex flex-wrap gap-2">
-                      {msg.sources.map((s: any, idx: number) => (
-                        <span key={idx} className="text-[10px] bg-gray-100 px-2 py-1 rounded">
-                          {s.file_name} (p. {s.page_number})
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-          ))}
-          {loading && (
-            <div className="flex justify-start">
-              <div className="bg-white border p-4 rounded-lg shadow-sm">
-                <Loader2 className="animate-spin text-blue-600" />
-              </div>
-            </div>
-          )}
-        </div>
-
-        <form onSubmit={handleQuery} className="p-4 bg-white border-t">
-          <div className="max-w-4xl mx-auto flex space-x-4">
-            <input
-              type="text"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Ask a question about your documents..."
-              className="flex-1 border rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
-            <button
-              type="submit"
-              disabled={loading || !query.trim()}
-              className="bg-blue-600 text-white p-2 rounded-lg hover:bg-blue-700 disabled:opacity-50"
-            >
-              <Send size={20} />
-            </button>
           </div>
-        </form>
+        ))}
+        <div ref={scrollRef} />
       </div>
-    </div>
+
+      <div className="flex gap-2">
+        <input
+          className="flex-1 border rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500"
+          placeholder="Ask a question about your documents..."
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && handleChat()}
+        />
+        <button 
+          onClick={handleChat}
+          disabled={isTyping || !query}
+          className="bg-blue-600 text-white p-3 rounded-xl hover:bg-blue-700 disabled:opacity-50"
+        >
+          <Send size={24} />
+        </button>
+      </div>
+    </main>
   );
 }
