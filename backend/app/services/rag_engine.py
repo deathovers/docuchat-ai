@@ -1,32 +1,42 @@
 import logging
 import json
-import os
+import re
+import asyncio
 from typing import AsyncGenerator
 from llama_index.core import StorageContext, load_index_from_storage
 from app.services.vector_store import get_storage_path
-from app.core.security import sanitize_session_id
 
 logger = logging.getLogger(__name__)
+
+def sanitize_session_id(session_id: str) -> str:
+    """Strictly sanitize session_id to prevent directory traversal."""
+    return re.sub(r'[^a-zA-Z0-9_-]', '', session_id)
 
 async def query_documents(session_id: str, query: str) -> AsyncGenerator[str, None]:
     """
     Core RAG logic: Retrieves context and streams LLM response with citations.
-    Addresses QA bugs:
-    1. Uses async_response_gen for async iteration.
-    2. Sanitizes session_id for security.
-    3. Uses aquery for non-blocking I/O.
+    Offloads blocking I/O to a thread pool to keep the event loop responsive.
     """
     safe_session_id = sanitize_session_id(session_id)
-    storage_dir = get_storage_path(safe_session_id)
     
-    if not os.path.exists(storage_dir):
-        yield f"data: {json.dumps({'type': 'error', 'content': 'No documents found for this session. Please upload files first.'})}\n\n"
+    # SECURITY FIX: Ensure session_id is not empty after sanitization
+    if not safe_session_id:
+        logger.error(f"Invalid session_id attempt: '{session_id}'")
+        yield f"data: {json.dumps({'type': 'error', 'content': 'Invalid session ID provided.'})}\n\n"
         return
 
+    storage_dir = get_storage_path(safe_session_id)
+    loop = asyncio.get_event_loop()
+    
     try:
-        # Load index for the specific session
-        storage_context = StorageContext.from_defaults(persist_dir=storage_dir)
-        index = load_index_from_storage(storage_context)
+        # PERFORMANCE FIX: Offload blocking I/O to thread pool
+        # This prevents the event loop from freezing during disk access
+        storage_context = await loop.run_in_executor(
+            None, lambda: StorageContext.from_defaults(persist_dir=storage_dir)
+        )
+        index = await loop.run_in_executor(
+            None, lambda: load_index_from_storage(storage_context)
+        )
         
         # Configure query engine with streaming enabled
         query_engine = index.as_query_engine(
@@ -34,37 +44,27 @@ async def query_documents(session_id: str, query: str) -> AsyncGenerator[str, No
             similarity_top_k=5
         )
         
-        # Use asynchronous query to prevent blocking the event loop
+        # Use asynchronous query
         response = await query_engine.aquery(query)
         
-        # 1. Stream the text chunks using the correct async generator
-        # Fix for TypeError: 'generator' object is not an async iterable
+        # 1. Stream the text chunks
         async for token in response.async_response_gen:
             yield f"data: {json.dumps({'type': 'text', 'content': token})}\n\n"
             
-        # 2. Extract citations from source nodes (metadata)
-        # This replaces redundant retriever.retrieve() calls
+        # 2. Extract and stream citations from source nodes
         citations = []
-        if hasattr(response, "source_nodes"):
-            for node in response.source_nodes:
-                metadata = node.node.metadata
-                citations.append({
-                    "filename": metadata.get("file_name", "Unknown"),
-                    "page": metadata.get("page_label", "N/A")
-                })
+        for node in response.source_nodes:
+            metadata = node.node.metadata
+            citations.append({
+                "filename": metadata.get("file_name", "Unknown"),
+                "page": metadata.get("page_label", "N/A")
+            })
         
-        # Deduplicate citations based on filename and page
-        unique_citations = []
-        seen = set()
-        for c in citations:
-            key = (c["filename"], c["page"])
-            if key not in seen:
-                unique_citations.append(c)
-                seen.add(key)
-
+        # Remove duplicates
+        unique_citations = [dict(t) for t in {tuple(d.items()) for d in citations}]
         yield f"data: {json.dumps({'type': 'citations', 'content': unique_citations})}\n\n"
-        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+        yield "data: {\"type\": \"done\"}\n\n"
 
     except Exception as e:
-        logger.exception(f"Critical error in RAG engine for session {safe_session_id}")
-        yield f"data: {json.dumps({'type': 'error', 'content': 'An internal error occurred during retrieval.'})}\n\n"
+        logger.error(f"Error in RAG engine for session {safe_session_id}: {str(e)}")
+        yield f"data: {json.dumps({'type': 'error', 'content': 'An error occurred while processing your request.'})}\n\n"
