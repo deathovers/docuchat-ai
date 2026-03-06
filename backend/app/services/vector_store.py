@@ -1,9 +1,18 @@
-from pinecone import Pinecone
-from llama_index.vector_stores.pinecone import PineconeVectorStore
-from app.core.config import settings
+import os
+from app.core.security import sanitize_session_id
 
-pc = Pinecone(api_key=settings.PINECONE_API_KEY)
+STORAGE_BASE_DIR = os.getenv("STORAGE_BASE_DIR", "./storage")
 
-def get_vector_store(namespace: str):
-    pinecone_index = pc.Index(settings.PINECONE_INDEX_NAME)
-    return PineconeVectorStore(pinecone_index=pinecone_index, namespace=namespace)
+def get_storage_path(session_id: str) -> str:
+    """
+    Returns the sanitized absolute path for a session's vector store.
+    """
+    safe_id = sanitize_session_id(session_id)
+    # os.path.join with a sanitized base and sanitized ID is safe
+    path = os.path.join(os.path.abspath(STORAGE_BASE_DIR), safe_id)
+    return path
+
+def ensure_storage_exists(session_id: str):
+    path = get_storage_path(session_id)
+    os.makedirs(path, exist_ok=True)
+    return path
